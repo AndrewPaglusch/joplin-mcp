@@ -5,6 +5,7 @@ FROM node:22-bookworm AS builder
 ARG JOPLIN_TAG_FILTER=v3.*
 
 ENV HUSKY=0 \
+    SKIP_ONENOTE_CONVERTER_BUILD=1 \
     DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,10 +18,17 @@ RUN git clone --filter=blob:none https://github.com/laurent22/joplin.git . \
     && echo "Building Joplin @ ${REF}" \
     && git checkout --detach "${REF}"
 
-RUN corepack enable \
-    && yarn install --inline-builds
+# Install + build only the terminal app and its dependency subtree, skipping the
+# desktop/mobile/server packages (webpack, react-native, wasm) and their toolchains.
+RUN node -e "const fs=require('fs'),p=JSON.parse(fs.readFileSync('package.json'));delete p.scripts.postinstall;fs.writeFileSync('package.json',JSON.stringify(p,null,2))" \
+    && corepack enable \
+    && yarn workspaces focus joplin
 
-RUN yarn workspace joplin build
+RUN yarn workspaces foreach -R --from joplin --topological-dev --jobs 1 \
+        --exclude joplin --exclude '@joplin/onenote-converter' run build \
+    && yarn workspaces foreach -R --from joplin --topological-dev --jobs 1 --exclude joplin run tsc \
+    && yarn workspace joplin tsc \
+    && yarn workspace joplin build
 
 # --------------------------------------------------------------------------------
 
