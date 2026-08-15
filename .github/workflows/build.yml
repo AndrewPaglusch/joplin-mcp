@@ -1,0 +1,105 @@
+name: Build and Publish Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Joplin release tag to build (blank = latest v3.x)'
+        required: false
+      force:
+        description: 'Rebuild even if image tag already exists in GHCR'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/joplin-mcp
+  UPSTREAM_REPO: https://github.com/laurent22/joplin.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Determine Joplin tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG=$(git ls-remote --tags --refs "$UPSTREAM_REPO" 'v3.*' \
+              | awk -F/ '{print $NF}' | sort -V | tail -1)
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved Joplin tag: $TAG (version: $VERSION)"
+
+      - name: Log into ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image tag already exists
+        id: check
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.version }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          if [ "$FORCE" = "true" ]; then
+            echo "Force rebuild requested."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          elif docker manifest inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            echo "Image already published: $IMAGE_REF"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image not yet published: $IMAGE_REF"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        if: steps.check.outputs.exists == 'false'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=match,pattern=v(\d+),group=1,value=${{ steps.tag.outputs.tag }}
+            type=match,pattern=v(\d+\.\d+),group=1,value=${{ steps.tag.outputs.tag }}
+            type=match,pattern=v(\d+\.\d+\.\d+),group=1,value=${{ steps.tag.outputs.tag }}
+
+      - name: Build and push
+        if: steps.check.outputs.exists == 'false'
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            JOPLIN_TAG_FILTER=${{ steps.tag.outputs.tag }}
+          platforms: linux/amd64
+
+      - name: Image digest
+        if: steps.check.outputs.exists == 'false'
+        run: echo "Pushed digest ${{ steps.build.outputs.digest }}"
