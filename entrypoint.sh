@@ -38,15 +38,17 @@ joplin sync || echo "[entrypoint] initial sync failed; will retry in background"
 
 # Decrypt before the server/sync-worker start, while nothing else holds the DB.
 if [ -n "${JOPLIN_E2EE_PASSWORD:-}" ]; then
-    joplin e2ee decrypt --password "$JOPLIN_E2EE_PASSWORD" --retry-failed-items \
-        || echo "[entrypoint] decrypt pass failed"
+    joplin e2ee decrypt --password "$JOPLIN_E2EE_PASSWORD" --retry-failed-items || echo "[entrypoint] decrypt pass failed"
 fi
 
 echo "Starting sync worker. Sync interval: ${SYNC_INTERVAL}..."
 (
     while true; do
         sleep "$SYNC_INTERVAL"
-        joplin sync || echo "[sync] failed; retrying next interval"
+        joplin sync || { echo "[sync] failed; retrying next interval"; continue; }
+        if [ -n "${JOPLIN_E2EE_PASSWORD:-}" ]; then
+            joplin e2ee decrypt --password "$JOPLIN_E2EE_PASSWORD" || echo "[sync] decrypt pass failed"
+        fi
     done
 ) &
 SYNC_LOOP_PID=$!
